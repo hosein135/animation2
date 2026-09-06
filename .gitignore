@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Render outputs (keep directory via .gitkeep)
+output/frames/
+output/*.mp4
+output/*.png
+output/*.jpg
+output/*.svg
+output/logs/
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
