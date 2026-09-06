@@ -73,7 +73,7 @@ export function spawnNode(node, materials, ctx, dataDir, parent = null) {
     obj = P.makeCamera(name, node.location || loc, node.look_at || [0, 0, 0], {
       lens: Number(node.lens ?? 50),
       ortho_scale: node.ortho_scale,
-      camera_type: String(node.camera_type || node.type || "ORTHO"),
+      camera_type: String(node.camera_type || (node.ortho_scale != null ? "ORTHO" : "PERSP")),
     });
   } else if (ntype === "light") {
     obj = P.area(name, loc, Number(node.energy ?? 500), Number(node.size ?? 4), {

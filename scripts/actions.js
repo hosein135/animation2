@@ -130,6 +130,11 @@ export function follow_axis(cfg, ctx) {
   insertLoc(o, end, loc1);
 }
 
+function insertLookAt(o, frame, target) {
+  if (!o.keyframes.look_at) o.keyframes.look_at = [];
+  o.keyframes.look_at.push({ frame, value: [...target] });
+}
+
 export function look_at(cfg, ctx) {
   const o = obj(ctx, cfg.target);
   const [start, end] = frameRange(cfg, ctx);
@@ -142,10 +147,14 @@ export function look_at(cfg, ctx) {
   const loc0 = cfg.locations ? [...cfg.locations[0]] : [...o.location];
   const loc1 = cfg.locations ? [...cfg.locations[cfg.locations.length - 1]] : [...o.location];
   o.location = loc0;
+  o.look_at = [...points[0]];
+  insertLookAt(o, start, points[0]);
   const rot0 = lookAtEuler(loc0, points[0]);
   o.rotation = rot0;
   insertRot(o, start, rot0);
   o.location = loc1;
+  o.look_at = [...points[points.length - 1]];
+  insertLookAt(o, end, points[points.length - 1]);
   const rot1 = lookAtEuler(loc1, points[points.length - 1]);
   o.rotation = rot1;
   insertRot(o, end, rot1);
@@ -234,8 +243,10 @@ export function evaluateAtFrame(ctx, frame, interpolationModes = {}) {
     const mode = interpolationModes[name] || "LINEAR";
     const loc = sampleChannel(o.keyframes.location, frame, mode);
     const rot = sampleChannel(o.keyframes.rotation, frame, mode);
+    const look = sampleChannel(o.keyframes.look_at, frame, mode);
     if (loc) o.location = loc;
     if (rot) o.rotation = rot;
+    if (look) o.look_at = look;
   }
   void interpMode;
 }

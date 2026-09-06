@@ -6,12 +6,14 @@ import * as d3 from "d3";
 import { Resvg } from "@resvg/resvg-js";
 import { evaluateAtFrame } from "./actions.js";
 import { buildCamera, projectPoint, projectRadius } from "./camera.js";
-import { cross, normalize, rgbToHex, shadeColor, sub } from "./math.js";
+import { cross, dot, normalize, rgbToHex, shadeColor, sub } from "./math.js";
 import { expandDrawables } from "./prims.js";
 
 function bgCss(scene) {
   const c = scene.background_color || [0.39, 0.6, 0.74, 1];
-  return rgbToHex(c);
+  // Blender world background multiplies RGB by background_strength.
+  const s = Number(scene.background_strength ?? 1);
+  return rgbToHex([c[0] * s, c[1] * s, c[2] * s]);
 }
 
 function lightDirs(ctx) {
@@ -73,6 +75,79 @@ function onScreen(bounds, W, H, pad = 64) {
   return true;
 }
 
+/**
+ * Orthographic silhouette of a unit sphere transformed by mat4 linear part.
+ * Returns pixel-space {cx,cy,rx,ry,angleDeg,depth}.
+ */
+function projectTransformedCircle(cam, wm, radiusX = 1, radiusY = 1) {
+  const c = [
+    wm[12],
+    wm[13],
+    wm[14],
+  ];
+  // Columns 0/1 of linear part scaled by circle radii in local XY.
+  const c0 = [wm[0] * radiusX, wm[1] * radiusX, wm[2] * radiusX];
+  const c1 = [wm[4] * radiusY, wm[5] * radiusY, wm[6] * radiusY];
+  const B00 = dot(cam.right, c0);
+  const B01 = dot(cam.right, c1);
+  const B10 = dot(cam.up, c0);
+  const B11 = dot(cam.up, c1);
+  const s00 = B00 * B00 + B01 * B01;
+  const s01 = B00 * B10 + B01 * B11;
+  const s11 = B10 * B10 + B11 * B11;
+  const half = (s00 + s11) / 2;
+  const diff = (s00 - s11) / 2;
+  const disc = Math.sqrt(Math.max(0, diff * diff + s01 * s01));
+  const l1 = Math.max(0, half + disc);
+  const l2 = Math.max(0, half - disc);
+  const angle = 0.5 * Math.atan2(2 * s01, s00 - s11);
+  const px = cam.width / (2 * cam.halfW);
+  const p = projectPoint(cam, c);
+  return {
+    cx: p.x,
+    cy: p.y,
+    depth: p.depth,
+    rx: Math.max(0.5, Math.sqrt(l1) * px),
+    ry: Math.max(0.5, Math.sqrt(l2) * px),
+    // SVG Y is down → negate camera-plane angle.
+    angleDeg: (-angle * 180) / Math.PI,
+  };
+}
+
+/** Full oriented ellipsoid: unit sphere × mat4 (includes scale + rotation). */
+function projectOrientedEllipsoid(cam, wm) {
+  // Build 2×3 B = [right,up]^T * M_3x3, then silhouette from B B^T.
+  const cols = [
+    [wm[0], wm[1], wm[2]],
+    [wm[4], wm[5], wm[6]],
+    [wm[8], wm[9], wm[10]],
+  ];
+  const B = [
+    [dot(cam.right, cols[0]), dot(cam.right, cols[1]), dot(cam.right, cols[2])],
+    [dot(cam.up, cols[0]), dot(cam.up, cols[1]), dot(cam.up, cols[2])],
+  ];
+  const s00 = B[0][0] ** 2 + B[0][1] ** 2 + B[0][2] ** 2;
+  const s01 = B[0][0] * B[1][0] + B[0][1] * B[1][1] + B[0][2] * B[1][2];
+  const s11 = B[1][0] ** 2 + B[1][1] ** 2 + B[1][2] ** 2;
+  const half = (s00 + s11) / 2;
+  const diff = (s00 - s11) / 2;
+  const disc = Math.sqrt(Math.max(0, diff * diff + s01 * s01));
+  const l1 = Math.max(0, half + disc);
+  const l2 = Math.max(0, half - disc);
+  const angle = 0.5 * Math.atan2(2 * s01, s00 - s11);
+  const px = cam.width / (2 * cam.halfW);
+  const center = [wm[12], wm[13], wm[14]];
+  const p = projectPoint(cam, center);
+  return {
+    cx: p.x,
+    cy: p.y,
+    depth: p.depth,
+    rx: Math.max(0.5, Math.sqrt(l1) * px),
+    ry: Math.max(0.5, Math.sqrt(l2) * px),
+    angleDeg: (-angle * 180) / Math.PI,
+  };
+}
+
 function drawableElements(drawables, cam, lights) {
   const elems = [];
   const W = cam.width;
@@ -80,19 +155,22 @@ function drawableElements(drawables, cam, lights) {
 
   for (const d of drawables) {
     if (d.kind === "ellipse") {
-      const p = projectPoint(cam, d.center);
-      const rx = Math.max(1, projectRadius(cam, d.radii[0], d.center));
-      const ry = Math.max(1, projectRadius(cam, Math.max(d.radii[1], d.radii[2]) * 0.85, d.center));
-      if (!finite(p.x, p.y, p.depth, rx, ry)) continue;
-      if (!onScreen({ minX: p.x - rx, minY: p.y - ry, maxX: p.x + rx, maxY: p.y + ry }, W, H)) continue;
+      const e = d.matrix
+        ? projectOrientedEllipsoid(cam, d.matrix)
+        : null;
+      if (!e) continue;
+      if (!finite(e.cx, e.cy, e.depth, e.rx, e.ry)) continue;
+      const pad = Math.max(e.rx, e.ry);
+      if (!onScreen({ minX: e.cx - pad, minY: e.cy - pad, maxX: e.cx + pad, maxY: e.cy + pad }, W, H)) continue;
       const n = normalize([0.2, -0.8, 0.4]);
       elems.push({
         type: "ellipse",
-        depth: p.depth,
-        cx: p.x,
-        cy: p.y,
-        rx,
-        ry,
+        depth: e.depth,
+        cx: e.cx,
+        cy: e.cy,
+        rx: e.rx,
+        ry: e.ry,
+        angleDeg: e.angleDeg || 0,
         fill: shade(d.material, n, lights),
         name: d.name,
       });
@@ -185,21 +263,21 @@ function drawableElements(drawables, cam, lights) {
         name: d.name,
       });
     } else if (d.kind === "torus") {
-      // Draw as ellipse ring (major radius in XZ, viewed from camera)
-      const c = projectPoint(cam, d.center);
-      const R = projectRadius(cam, d.major, d.center);
-      const r = projectRadius(cam, d.minor, d.center);
-      const rx = Math.max(2, R);
-      const ry = Math.max(2, R * 0.55);
-      const strokeWidth = Math.max(1.5, r * 2);
-      if (!finite(c.x, c.y, c.depth, rx, ry, strokeWidth)) continue;
+      // Major ring projected as oriented ellipse; stroke width from minor radius.
+      const ring = d.matrix
+        ? projectTransformedCircle(cam, d.matrix, d.major, d.major)
+        : null;
+      if (!ring) continue;
+      const strokeWidth = Math.max(1.5, projectRadius(cam, d.minor, d.center) * 2);
+      if (!finite(ring.cx, ring.cy, ring.depth, ring.rx, ring.ry, strokeWidth)) continue;
+      const pad = Math.max(ring.rx, ring.ry) + strokeWidth;
       if (
         !onScreen(
           {
-            minX: c.x - rx - strokeWidth,
-            minY: c.y - ry - strokeWidth,
-            maxX: c.x + rx + strokeWidth,
-            maxY: c.y + ry + strokeWidth,
+            minX: ring.cx - pad,
+            minY: ring.cy - pad,
+            maxX: ring.cx + pad,
+            maxY: ring.cy + pad,
           },
           W,
           H,
@@ -209,11 +287,12 @@ function drawableElements(drawables, cam, lights) {
       }
       elems.push({
         type: "ellipse",
-        depth: c.depth,
-        cx: c.x,
-        cy: c.y,
-        rx,
-        ry,
+        depth: ring.depth,
+        cx: ring.cx,
+        cy: ring.cy,
+        rx: ring.rx,
+        ry: ring.ry,
+        angleDeg: ring.angleDeg || 0,
         fill: "none",
         stroke: shade(d.material, [0.1, -0.9, 0.2], lights),
         strokeWidth,
@@ -222,7 +301,8 @@ function drawableElements(drawables, cam, lights) {
     }
   }
 
-  elems.sort((a, b) => a.depth - b.depth);
+  // Far → near (painter's algorithm). Depth is distance along camera forward.
+  elems.sort((a, b) => b.depth - a.depth);
   return elems;
 }
 
@@ -248,27 +328,21 @@ export function renderSvgString(scene, ctx, frame) {
     `<rect width="100%" height="100%" fill="${bg}"/>`,
   ];
 
-  // Soft gradient sky overlay
-  parts.push(
-    `<defs><linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">`,
-    `<stop offset="0%" stop-color="#f4a36a" stop-opacity="0.55"/>`,
-    `<stop offset="45%" stop-color="#6aa8c8" stop-opacity="0.15"/>`,
-    `<stop offset="100%" stop-color="#3f6f8a" stop-opacity="0"/>`,
-    `</linearGradient></defs>`,
-    `<rect width="100%" height="100%" fill="url(#sky)"/>`,
-  );
-
   // Do not set per-shape opacity: @resvg/resvg-js 2.6.x panics on off-screen
   // isolated layers (geom.rs fit_to_rect unwrap). Solid fills avoid that path.
   for (const e of elems) {
     if (e.type === "ellipse") {
+      const rot =
+        e.angleDeg && Math.abs(e.angleDeg) > 0.01
+          ? ` transform="rotate(${e.angleDeg.toFixed(2)} ${e.cx.toFixed(2)} ${e.cy.toFixed(2)})"`
+          : "";
       if (e.fill === "none") {
         parts.push(
-          `<ellipse cx="${e.cx.toFixed(2)}" cy="${e.cy.toFixed(2)}" rx="${e.rx.toFixed(2)}" ry="${e.ry.toFixed(2)}" fill="none" stroke="${e.stroke}" stroke-width="${e.strokeWidth.toFixed(2)}" stroke-linecap="round"/>`,
+          `<ellipse cx="${e.cx.toFixed(2)}" cy="${e.cy.toFixed(2)}" rx="${e.rx.toFixed(2)}" ry="${e.ry.toFixed(2)}" fill="none" stroke="${e.stroke}" stroke-width="${e.strokeWidth.toFixed(2)}" stroke-linecap="round"${rot}/>`,
         );
       } else {
         parts.push(
-          `<ellipse cx="${e.cx.toFixed(2)}" cy="${e.cy.toFixed(2)}" rx="${e.rx.toFixed(2)}" ry="${e.ry.toFixed(2)}" fill="${e.fill}"/>`,
+          `<ellipse cx="${e.cx.toFixed(2)}" cy="${e.cy.toFixed(2)}" rx="${e.rx.toFixed(2)}" ry="${e.ry.toFixed(2)}" fill="${e.fill}"${rot}/>`,
         );
       }
     } else if (e.type === "polygon") {
