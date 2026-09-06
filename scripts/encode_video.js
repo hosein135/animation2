@@ -44,44 +44,30 @@ function x264Extra(outCfg) {
   ];
 }
 
-function ffmpegHasEncoder(ffmpeg, name) {
-  const r = Bun.spawnSync([ffmpeg, "-hide_banner", "-encoders"], { stdout: "pipe", stderr: "pipe" });
-  const text = (r.stdout?.toString?.() || "") + (r.stderr?.toString?.() || "");
-  return text.includes(name);
+function extrasFor(codec, outCfg) {
+  if (codec === "h264_nvenc") return nvencExtra(outCfg);
+  if (codec === "h264_qsv") return qsvExtra(outCfg);
+  return x264Extra(outCfg);
 }
 
-function pickCodec(scene, hw) {
+function codecOrder(scene, hw) {
   const outCfg = scene.output || {};
   const forced = outCfg.video_codec;
   if (forced && forced !== "auto" && forced !== "libx264") {
-    if (String(forced).endsWith("_nvenc")) return [forced, nvencExtra(outCfg)];
-    if (String(forced).endsWith("_qsv")) return [forced, qsvExtra(outCfg)];
-    return [forced, []];
+    return [forced];
   }
 
   const prefer = outCfg.prefer_encoder || "auto";
-  const ffmpeg = hw.ffmpegPath;
-  const order =
-    prefer === "nvenc"
-      ? ["h264_nvenc", "h264_qsv", "libx264"]
-      : prefer === "qsv"
-        ? ["h264_qsv", "h264_nvenc", "libx264"]
-        : prefer === "cpu"
-          ? ["libx264"]
-          : hw.nvidia
-            ? ["h264_nvenc", "h264_qsv", "libx264"]
-            : hw.intel
-              ? ["h264_qsv", "libx264"]
-              : ["libx264"];
+  if (prefer === "cpu") return ["libx264"];
+  if (prefer === "nvenc") return ["h264_nvenc", "h264_qsv", "libx264"];
+  if (prefer === "qsv") return ["h264_qsv", "h264_nvenc", "libx264"];
 
-  for (const codec of order) {
-    if (codec === "libx264" || ffmpegHasEncoder(ffmpeg, codec)) {
-      if (codec === "h264_nvenc") return [codec, nvencExtra(outCfg)];
-      if (codec === "h264_qsv") return [codec, qsvExtra(outCfg)];
-      return ["libx264", x264Extra(outCfg)];
-    }
-  }
-  return ["libx264", x264Extra(outCfg)];
+  // Prefer probed capabilities; fall back through the full chain at encode time.
+  if (hw.hasNvenc) return ["h264_nvenc", "h264_qsv", "libx264"];
+  if (hw.hasQsv) return ["h264_qsv", "libx264"];
+  if (hw.nvidia) return ["h264_nvenc", "h264_qsv", "libx264"];
+  if (hw.intel) return ["h264_qsv", "libx264"];
+  return ["libx264"];
 }
 
 function detectFramePattern(framesDir) {
@@ -94,6 +80,10 @@ function detectFramePattern(framesDir) {
   return { pattern: join(framesDir, `frame_%0${digits}d.png`), count: files.length };
 }
 
+function runFfmpeg(ffmpeg, args) {
+  return Bun.spawnSync([ffmpeg, ...args], { stdout: "inherit", stderr: "inherit" });
+}
+
 export function encodeFrames(framesDir, outputMp4, scene, hw, expectedFrames = null) {
   const ffmpeg = hw.ffmpegPath || Bun.which("ffmpeg");
   if (!ffmpeg) throw new Error("ffmpeg not found on PATH");
@@ -104,26 +94,46 @@ export function encodeFrames(framesDir, outputMp4, scene, hw, expectedFrames = n
   }
 
   const fps = Number(scene.fps || 14);
-  const [codec, extra] = pickCodec(scene, { ...hw, ffmpegPath: ffmpeg });
+  const outCfg = scene.output || {};
+  const order = codecOrder(scene, hw);
+  const errors = [];
 
-  const args = [
-    "-y",
-    "-framerate",
-    String(fps),
-    "-i",
-    pattern,
-    "-c:v",
-    codec,
-    ...extra,
-    "-pix_fmt",
-    "yuv420p",
-    "-movflags",
-    "+faststart",
-    outputMp4,
-  ];
+  for (const codec of order) {
+    const extra = extrasFor(codec, outCfg);
+    const args = [
+      "-y",
+      "-framerate",
+      String(fps),
+      "-i",
+      pattern,
+      "-c:v",
+      codec,
+      ...extra,
+      "-pix_fmt",
+      "yuv420p",
+      "-movflags",
+      "+faststart",
+      outputMp4,
+    ];
 
-  console.log(`==> ffmpeg encode (${codec}): ${outputMp4}`);
-  const r = Bun.spawnSync([ffmpeg, ...args], { stdout: "inherit", stderr: "inherit" });
-  if (r.exitCode !== 0) throw new Error(`ffmpeg failed (exit ${r.exitCode})`);
-  return codec;
+    console.log(`==> ffmpeg encode (${codec}): ${outputMp4}`);
+    if (hw.nvencSkipReason && codec === "h264_nvenc") {
+      console.log(`  note: ${hw.nvencSkipReason}`);
+    }
+    if (hw.qsvSkipReason && codec === "h264_qsv") {
+      console.log(`  note: ${hw.qsvSkipReason}`);
+    }
+
+    const r = runFfmpeg(ffmpeg, args);
+    if (r.exitCode === 0) return codec;
+
+    const msg = `ffmpeg ${codec} failed (exit ${r.exitCode})`;
+    errors.push(msg);
+    const remaining = order.slice(order.indexOf(codec) + 1);
+    if (remaining.length) {
+      console.log(`==> ${msg}; falling back to ${remaining[0]}...`);
+    }
+  }
+
+  throw new Error(`ffmpeg failed after trying ${order.join(" → ")}: ${errors.join("; ")}`);
 }
