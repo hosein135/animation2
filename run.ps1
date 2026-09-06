@@ -13,7 +13,7 @@ $bunTargetVersion = "1.1.42"
 $vfoxVersion = "0.6.2"
 $ffmpegTargetVersion = "7.1"
 
-# Shared with Show-PipelineInvolvement — computed from live detection, never hardcoded.
+# Shared with Show-PipelineInvolvement - computed from live detection, never hardcoded.
 $script:HostInventory = @{
     CpuName = "Unknown"; CpuVendor = "Unknown"; CpuClass = "Other"
     Cores = 0; Threads = 1; MemoryGB = 0
@@ -43,7 +43,7 @@ function Refresh-SessionPath {
         }
     }
 
-    # vfox < 1.0 → ~/.vfox/sdks ; vfox >= 1.0 → ~/.version-fox/sdks
+    # vfox < 1.0 -> ~/.vfox/sdks ; vfox >= 1.0 -> ~/.version-fox/sdks
     foreach ($sdkRoot in @("$HOME\.vfox\sdks", "$HOME\.version-fox\sdks")) {
         if (-not (Test-Path $sdkRoot)) { continue }
         $exe = Get-ChildItem -Path $sdkRoot -Recurse -Filter "bun.exe" -ErrorAction SilentlyContinue |
@@ -215,7 +215,7 @@ function Show-HostHardwareInventory {
         Write-Host "  CPU vendor : $cpuVendor" -ForegroundColor Gray
         Write-Host "  Cores      : $cores physical / $logical logical threads" -ForegroundColor Gray
         Write-Host "  RAM        : ~$memGB GB" -ForegroundColor Gray
-        Write-Host "  Class      : $cpuClass — Bun/d3 render + FFmpeg threads scale from logical count" -ForegroundColor $classColor
+        Write-Host "  Class      : $cpuClass - Bun/d3 render + FFmpeg threads scale from logical count" -ForegroundColor $classColor
     } catch {
         Write-Host "  CPU query failed: $($_.Exception.Message)" -ForegroundColor Yellow
     }
@@ -270,7 +270,7 @@ function Show-HostHardwareInventory {
         if ($LASTEXITCODE -eq 0) { $script:HostInventory.NvidiaSmi = $true }
         else { Write-Host "  nvidia-smi present but -L failed (driver issue?)" -ForegroundColor Yellow }
     } else {
-        Write-Host "  nvidia-smi: not on PATH — NVENC path may be unavailable; libx264 still works" -ForegroundColor Yellow
+        Write-Host "  nvidia-smi: not on PATH - NVENC path may be unavailable; libx264 still works" -ForegroundColor Yellow
     }
 }
 
@@ -286,7 +286,7 @@ function Show-PipelineInvolvement {
     $intel  = @($adapters | Where-Object { $_.Name -match '(?i)intel' })
 
     Write-Host "  d3.js render:" -ForegroundColor White
-    Write-Host "   - Bun builds the JSON scene graph and projects with d3 (SVG → PNG via resvg)" -ForegroundColor Cyan
+    Write-Host "   - Bun builds the JSON scene graph and projects with d3 (SVG -> PNG via resvg)" -ForegroundColor Cyan
     Write-Host "   - CPU-bound orthographic draw; no Blender required" -ForegroundColor DarkGray
 
     Write-Host ""
